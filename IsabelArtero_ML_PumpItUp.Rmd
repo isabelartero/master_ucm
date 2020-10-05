@@ -271,12 +271,12 @@ dtTotal$num_private <- NULL
 
 ### Variables con info duplicada
 
-Dentro de las variables categóricas encontramos varias que tienen la misma descripción. Aprovecho lo que realizamos con mi grupo de tirar un modelo Random Forest y quedarme con solo una de ellas, la que más imporantancia tiene para el modelo.
+Dentro de las variables categóricas encontramos varias que tienen la misma descripción. Aprovecho un modelo anterior Random Forest y me quedo con solo una de ellas, la que más imporantancia tiene para el modelo.
 
 El modelo sería el siguiente, no lo corro (tendría que separ train y test y unir la target)
 
 ```{r rf cat}
-#my_mod_cat <- ranger( 
+# my_mod_cat <- ranger( 
 #  as.factor(status_group) ~ scheme_management + scheme_name
 #  + extraction_type  + extraction_type_group + extraction_type_class 
 #  + management + management_group 
@@ -391,8 +391,6 @@ Nota: *fe_distancia* sola la incluye el primer modelo ya que era el que mejor me
 
 ## Modelo ranger sin muchos parámetros
   
-Mismo modelo que hice con mis compañeros de grupo 
-
     - Resultado sin *fe_distancia*: 0.8190 
     - Resultado con *fe_distancia*: 0.8194 (mejor resultado obtenido)
   
@@ -414,18 +412,6 @@ rang_ranger1$vars <- rownames(rang_ranger1)
 names(rang_ranger1)[1]<- c('Importance')
 rang_ranger1 %>%
   arrange(desc(Importance))
-
-```
-
-Subida:
-
-```{r submission ranger1}
-pred_ranger1 <- predict(modelo_ranger1, mi_test)
-ia_sub_ranger1 <- data.frame(
-                     id = mi_test$id,
-                     status_group = pred_ranger1$prediction
-                     )
-fwrite(ia_sub_ranger1, file= "ia_sub_ranger1BIS.csv", sep=",")
 
 ```
 
@@ -492,18 +478,6 @@ rang_ranger250 %>%
 
 ```
 
-Subida:
-
-```{r submission ranger gs}
-pred_ranger250 <- predict(modelo_ranger250, mi_test)
-ia_sub_ranger250 <- data.frame(
-                     id = mi_test$id,
-                     status_group = pred_ranger250$prediction
-                     )
-fwrite(ia_sub_ranger250, file= "ia_sub_ranger250.csv", sep=",")
-
-```
-
 ## Modelo XGBoost
 
 Mismos parámetros que mis compañeros que ganaron el concurso, excepto el numero de rondas que lo cambio a 10
@@ -547,28 +521,6 @@ xgb.plot.importance(importance)
 
 ```
 
-Subida:
-
-```{r prediction xgb1}
-test_max <- xgb.DMatrix(data.matrix(mi_test))
-
-prediccion_xgb <- predict(modelo_xgb, test_max, reshape = T)
-colnames(prediccion_xgb) <- c("functional", "functional needs repair", "non functional")
-  
-prediccion_xgb$prediction = apply(prediccion_xgb, 1 , function(x) colnames(prediccion_xgb)[which.max(x)])
-
-```
-
-```{r submission xgb1}
-# Submission 
-ia_sub_xgb <- data.frame(
-                     id = mi_test$id,
-                     status_group = prediccion_xgb$prediction
-                     )
-fwrite(ia_sub_xgb, file= "ia_sub_xgb.csv", sep=",")
-
-```
-
 ## Modelo XGBboost con parámetros por defecto
 
 Dado que el resultado ha sido tan malo con los mismos parámetros que usaron mis compañeros de concurso, los cambio por los dados por defecto en el algoritmo, dando un resultado todavía peor.
@@ -607,28 +559,6 @@ Importancia de variables:
 ```{r imp var xgb2}
 importance <- xgb.importance(feature_names = names(dtEnd[,-35]), model = modelo_xgb_2)
 xgb.plot.importance(importance)
-
-```
-
-Subida:
-
-```{r prediction xgb2}
-test_max <- xgb.DMatrix(data.matrix(mi_test))
-
-prediccion_xgb_2 <- predict(modelo_xgb_2, test_max, reshape = T)
-colnames(prediccion_xgb_2) <- c("functional", "functional needs repair", "non functional")
-  
-prediccion_xgb_2$prediction = apply(prediccion_xgb_2, 1 , function(x) colnames(prediccion_xgb_2)[which.max(x)])
-
-```
-
-```{r submission xgb2}
-# Submission 
-ia_sub_xgb_2 <- data.frame(
-                     id = mi_test$id,
-                     status_group = prediccion_xgb_2$prediction
-                     )
-fwrite(ia_sub_xgb_2, file= "ia_sub_xgb2.csv", sep=",")
 
 ```
 
