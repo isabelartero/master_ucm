@@ -1,0 +1,1046 @@
+---
+title: Datos Elecciones España"
+author: "Isabel Artero"
+date: "5/10/2020"
+output: html_document
+---
+
+# MODELOS CON DATOS ELECCIONES
+
+# Introducción
+
+Este documento trata sobre la depuración de datos del conjunto de datos *DatosEleccionesEspaña.xlxs* y la posterior modelización con regresión lineal y logística para predecir los resultados de la izquierda en las próximas elecciones.
+
+  1. Regresión lineal sobre porcentaje de votos a la izquierda (*Izda_Pct*) 
+  2. Regresión logística sobre votos a la izquierda  (*Izquierda*) 
+
+
+## Carga de datos, paquetes y funciones
+
+En este primer apartado se cargan los datos, los paquetes necesarios para la práctica y las funciones del archivo de clase Funciones_R.R para poder llevar a cabo el ejercicio.
+
+```{r preambulo, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+# Directorio de trabajo
+setwd('C:/Users/isabe/OneDrive/Escritorio/M/4 Minería de datos y modelización predictiva/Evaluacion_Guille/FINAL')
+
+# Cargo las funciones que utilizaré
+source("Funciones_R.R")
+
+# Cargo las librerias necesarias para todo el ejercicio
+paquetes(c('questionr','psych','car','corrplot','readxl','ggplot2','caret','lmSupport', 'glmnet', 'epiDisplay', 'pROC'))
+
+#Importación y lectura del archivo de datos
+datos1 <- read_excel("DatosEleccionesEspaña.xlsx")
+colnames(datos1)
+ 
+```
+
+## Inspección de datos
+
+```{r inspeccion datos, warning=FALSE, include=FALSE}
+#quito variables que rechazo del enunciado y leo datos
+datos <- datos1[,-c(6,7,9,10,12)]
+str(datos)
+summary(datos)
+cuentaDistintos(datos) #valores diferentes en las variables cuantitativas
+```
+
+Tras una inspección de datos con las funciones str(), summary() y cuentaDistintos(), observamos que el archivo cuenta con 36 variables (porque ya he quitado las variables rechazadas del enunciado) y 8119 observaciones de las cuales no tenemos ninguna catégorica, lo que no tiene mucho sentido.
+
+Puntos de acción:
+
++ Comprobaré los niveles de las CCAA para ver que no tenga valores fuera de rango, además es una variable que tiene pinta de ser muy influente por lo que haré categorías más pequeñas (19 son muchas)
++ Voy a hacer el estudio por zonas según CCAA así que rechazaré las variables *Name* y *CodProv*
++ Variables que pueden tener atípicos para las que comprobaré su distribución: *Population*, *TotalCensus*, *totalEmpresas*, *Industria*, *Construccion*, *ComercioTTEHosteleria*, *Servicios*, *inmuebles*, *Pob2010* y *SUPERFICIE*
++ De ellas, las variables poblaciones tienen atípicos por ciudades grandes como Madrid y Barcelona, como no considero correcto eliminarlas porque son importantes, haré categorías.
++ Variables de empresas haré transformaciones.
++ *ForeignersPtge* tiene valores negativos, lo que parece un error pues no tiene sentido que haya porcentajes negativos según la descripción de la variable.
++ *SameComAutonPtge* tiene como valores máximos mayores de 100, igual que la anterior, no tiene mucho sentido según la descripción de la variable. Parece un error de codificicación
++ Hay un claro problema de missings (NA's) en el archivo bruto, principalmente de los datos de empresas y empresas por sectores.
++ Las variables *ActividadPpal* y *Densidad* deberían ser categóricas dependiendo de la frequencia de sus datos
++ Creo que tiene más sentido categorizar la variable continua *PersonasInmueble*
++ *Explotaciones* tiene valores fuera de rango (99999)
+
+```{r missings, echo=TRUE}
+#Aunque ya lo sabemos, pregunto si hay missings entre los datos dados y cuantos
+any(is.na(datos))
+sum(is.na(datos))
+
+#Patrón
+corrplot(cor(is.na(datos[colnames(datos)[colSums(is.na(datos))>0]])),method = "ellipse",type = "upper")
+
+```
+
+Patrón que encuentro en los NAs
+- La variable Pob2010 y PobChange tienen relación, pues la segunda depende de la primera
+- Empresas de Industria y Comercio, al tomarse los datos por poblaciones pueden haber obviado los mims datos
+
+
+## Corrección de errores detectados
+
+Ya he visto que tengo varias problemillas en el datasheet, es hora de actuar
+
+1. Voy a quitar las variables *Name* y *CodProv* ya que haré el estudio por CCAA (que además reduciré a Zonas). Son variables identificativas (otra opción sería unirlas y declararlas el ID del datasheet)
+
+```{r colnames, warning=FALSE, include=FALSE}
+# Vemos como se llaman las variables y quito los nombres de los municipios y las provincias
+colnames(datos)
+datos=datos[,-c(1,2)]
+
+colnames(datos)
+
+# Cambio nombres para que no sean tan largos
+names(datos)[2] = 'Pob'
+names(datos)[3] = 'Censo'
+names(datos)[6] = 'Age0_4'
+names(datos)[7] = 'Under19'
+names(datos)[8] = 'Age19_65'
+names(datos)[9] = 'Over65' 
+names(datos)[10] = 'Women'
+names(datos)[11] = 'Foreign'
+names(datos)[12] = 'MismaCom'
+names(datos)[13] = 'MismaComDifProv'
+names(datos)[14] = 'DifCom'
+names(datos)[15] = 'UnemplLess25'
+names(datos)[16] = 'Unempl25_40'
+names(datos)[17] = 'UnemplMore40'
+names(datos)[18] = 'UnemplAgri'
+names(datos)[19] = 'UnemplInd'
+names(datos)[20] = 'UnemplCons'
+names(datos)[21] = 'UnemplServ'
+names(datos)[22] = 'NEmpr'
+names(datos)[25] = 'Comercio'
+names(datos)[28] = 'Inmuebles'
+names(datos)[30] = 'Superficie'
+names(datos)[32] = 'PobChange'
+names(datos)[33] = 'PersInmb'
+
+colnames(datos)
+```
+
+### 1. Errores en la codificiación de variables y pasar a factor
+
+Tras ver la frecuencia de *ActividadPpal* y *Densidad* las convierto a factor, debo tener cuidado con *Densidad* porque tengo un missing no declarado ('?'). Además, veo que las categorías Construcción e Industria están poco representadas, así que las juntaré en una sola.
+
+También paso a factor mi variable objetivo binaria: *Izquierda*
+
+```{r factor, echo=TRUE}
+freq(datos$ActividadPpal)
+freq(datos$Densidad)
+
+# Paso ambas a factor, pero ojo con Densidad porque tiene missing no declarados ('?') 
+datos[,c(5,27,31)] <- lapply(datos[,c(5,27,31)], factor)
+
+# Unir categorías poco representadas
+datos$ActividadPpal<-car::recode(datos$ActividadPpal, "'Construccion'='Const&Ind';'Industria'='Const&Ind';'ComercTTEHosteleria'='Comercio'")
+freq(datos$ActividadPpal)
+
+```
+
+Comprobación de cuantas *CCAA* están representadas y si tienen errores, por eso veo su frecuencia
+
+```{r CCAA, echo=FALSE}
+freq(datos$CCAA)
+datos$CCAA=as.factor(datos$CCAA)
+```
+
+No hay missings no declarados aunque Ceuta y Melilla están muy poco representadas. Además, 19 categorías son muchas, voy a juntarlas por zonas geográficas creando una nueva variable llamada *Zonas* y elimino *CCAA* del conjunto de datos.
+
+Principalmente, las uno por cercanía geográfica con la excepción de País Vasco y Cataluña serán otra categoría porque históricamente son las que mayor presencia tienen los partidos nacionalistas. Ahora tendré *Zonas* con 6 categorías.
+
+Otra opción, es ver el ejercico de cluster y unirlas.
+
+```{r creación Zonas, echo=TRUE}
+datos$Zonas<-car::recode(datos$CCAA, "'Andalucía'='Sur';
+                        'Aragón'='Noreste';
+                        'Asturias'='Norte';
+                        'Baleares'='Noreste';
+                        'Canarias'='Sur';
+                        'Cantabria'='Norte';
+                        'CastillaLeón'='Centro';
+                        'CastillaMancha'='Centro';
+                        'Cataluña'='Nacionalistas';
+                        'Ceuta'='Sur';
+                        'ComValenciana'='Levante';
+                        'Extremadura'='Sur';
+                        'Galicia'='Norte';
+                        'Madrid'='Centro';
+                        'Melilla'='Sur';
+                        'Murcia'='Levante';
+                        'Navarra'='Noreste';
+                        'PaísVasco'='Nacionalistas';
+                        'Rioja'='Noreste'")
+freq(datos$Zonas)
+
+# Y elimino mi antigua variable CCAA
+datos$CCAA= NULL
+
+```
+
+
+### 2. Tratamiento de valores fuera de rango / missings no declarados
+
+He visto que la variable *Densidad* ('?') y *Explotaciones* (99999) tiene missings no declarados. Además *Foreign* (valores negativos) y *MismaCom* tienen valores fuera de rango. Paso todos ellos a NA.
+
+```{r recodificación a missing, echo=TRUE}
+
+datos$Densidad<-recode.na(datos$Densidad,'?')
+datos$Explotaciones<-replace(datos$Explotaciones, which(datos$Explotaciones==99999), NA)
+datos$Foreign<-replace(datos$Foreign, which(datos$Foreign<0), NA)
+datos$MismaCom<-replace(datos$MismaCom, which(datos$MismaCom>100), NA)
+ 
+```
+
+### 3. Tratamiento de atípicos
+
+Veo gráfico de distribución de las variables que intuyo que tienen presencia de atípicos, además ya observé que tienen mucha diferencia entre la media y la mediana:
+*Pob*, *Censo*, *Pob2010*, *NEmpr*, *Industria*, *Construccion*, *Comercio*, *Servicios*, *Inmuebles* y *Superficie*
+
+####3.1. Categorización de variables continuas
+
+```{r gráficos de distribución de estas variables, echo=FALSE}
+par=(mfrow=c(2,5))
+dfplot(datos[,c(1,2,28,21:25,27,29)])
+
+any(is.na(datos[,c(1,2,21:25,27:29)]))
+
+```
+
+El problema de estos atípicos es que vienen dados por lo grandes ciudades como Madrid y Barcelona, pues la distribución es similar en todas ellas y tiene sentido. Ciudades con más población (*Pob*, *Censo* o *Pob2010*) suponen mayor número de empresas, en todos los sectores, y mayor número de inmuebles. No ocurre así con *Superficie* por lo que le daré el tratamiento de atípicos. 
+
+Como no quiero perder esta información porque me parece relevante, categorizo estas variables. Además, la relación lineal con la variable objetivo continua es muy baja, lo que corroborá aún más mi decisión de tramificar.
+
+```{r relación lineal con la objetivo, echo=TRUE}
+#relación lineal con la variable objetivo continua
+graficoCorrelacion(datos$Izda_Pct, datos$Censo)
+graficoCorrelacion(datos$Izda_Pct, datos$Inmuebles)
+graficoCorrelacion(datos$Izda_Pct, datos$Superficie) #no tan baja, los trato como atípicos porque superficie no lo relaciono con grandes ciudades (hay pueblos con poco población muy grandes en extensión, por ejemplo dehesas extremeñas)
+
+```
+
+Además, *Pob* y *Censo* me da prácticamente la misma información y como quiero predecir la intención de voto que se hace con el Censo (población con capacidad para votar), me voy a quedar solo con la variable *Censo* que es más representativa para el ejercicio.
+
+Por lo tanto, eliminaré *Pob* y *Pob2010*, no así con el porcentaje de cambio de población (*PobChange*) que me da la diferencia entre esas dos variables.
+
+Categorizo *Censo* en 4 tramos:
+
+  - Pueblo: municipios pequeños, cojo los datos hasta la mediana ya que el minimo y el primer quartil son muy pequeños. Además, es representativo de la población de España
+  - Pueblo Medio: pueblos un poco más grandes, cojo el dato de la media ya que también me parece explicativo
+  - Ciudad: en España hay varias poblaciones o capitales de provincia pequeñas que por mi experiencia considero que son hasta 50.000 hab. 
+  - Ciudad Grande: las ciudades más grandes, que irán desde 50.000 hab hasta el valor máximo
+  
+Hago lo mismo con *Inmuebles*, ya que esos atípicos también serán para ciudades grandes
+
+```{r categorizar variables continuas poblacionales, echo=TRUE}
+# Eliminar Pob y Pob2010
+datos = datos[,-c(1,28)]
+
+#Tramifico 
+datos$CensoCat <- cut(datos$Censo, breaks = c(3, 447, 4261, 50000, 2363829), labels = c("Pueblo", "Pueblo Medio", "Ciudad", "Ciudad Grande"))
+
+#Veo resultado de la tramificación
+freq(datos$CensoCat)
+
+#Inmuebles
+summary(datos$Inmuebles)
+datos$InmueblesCat <- cut(datos$Inmuebles, breaks = c(5, 486, 3256, 50000, 1615548), labels = c("Pueblo", "Pueblo Medio", "Ciudad", "Ciudad Grande"))
+
+freq(datos$InmueblesCat)
+
+#Elimino del dataframe las variables originales
+datos = datos[,-c(1,26)]
+
+
+```
+
+Para las variable de número de empresas haré 3 categorías en base a:
+
+  - Pocas empresas: hasta la mediana
+  - Moderado: desde la mediana hasta la media
+  - Muchas: superior a la media y hasta el máximo --> serían ya ciudades y ciudades grandes
+  
+Con el tipo de empresas, las haré dicotómicas con la siguiente relación:
+
+  - Toma valor 1 si hay empresas de ese sector
+  - Toma valor 0 si no hay empresas de ese sector
+  
+Además, al igual que con *ActividadPpal*, uno las variables *Industria* y *Construccion*
+
+```{r categorizar variables continuas empresas, echo=TRUE}
+#Tramificación Número de empresas
+datos$NEmprCat <- cut(datos$NEmpr, breaks = c(-1,30,399,299397), labels = c("Pocas o ninguna", "Moderado", "Muchas"))
+
+#Unir Industria y Construcción
+datos$IndConst = rowSums(datos[,20:21])
+
+#Dicotomizar variables
+datos$IndConstBin<-factor(replace(datos$IndConst, which(datos$IndConst > 0), 1))
+datos$ComercioBin<-factor(replace(datos$Comercio, which(datos$Comercio > 0), 1))
+datos$ServiciosBin<-factor(replace(datos$Servicios, which(datos$Servicios > 0), 1))
+
+freq(datos$NEmprCat)
+freq(datos$IndConstBin)
+freq(datos$ComercioBin)
+freq(datos$ServiciosBin)
+
+table(datos$NEmprCat,datos$Izquierda)
+
+#Eliminar variables originales
+datos<-subset(datos, select = -c(19:23,34))
+
+```
+
+
+####3.2. Definición de las variable objetivo y las input
+
+```{r definir variables objetivo e input}
+colnames(datos)
+
+varObjCont<-datos$Izda_Pct
+varObjBin<-datos$Izquierda
+input<-as.data.frame(datos[,-c(1,2)]) #quito las objetivo 
+
+```
+
+####3.3. Atípicos
+
+```{r atipicos}
+# Distribuciones de numéricas
+psych::describe(Filter(is.numeric, input)) 
+
+# % de atipicos por variable
+sapply(Filter(is.numeric, input),function(x) atipicosAmissing(x)[[2]])/nrow(input)
+
+```
+
+Seguidamente pasaremos los atípicos a missing
+
+```{r atípicos a missing}
+# Modifico los atípicos como missing
+input[,as.vector(which(sapply(input, class)=="numeric"))]<-sapply(Filter(is.numeric, input),function(x) atipicosAmissing(x)[[1]])
+
+sum(is.na(input))
+#summary(input)
+```
+
+### 4. Tratamiento de missing
+
+Sigo teniendo missing en las variables de empresas, pero se ha suavizado mucho.
+
+```{r propoción missing}
+#Distribución de missing en el dataframe
+corrplot(cor(is.na(input[colnames(input)[colSums(is.na(input))>0]])),method = "ellipse",type = "upper")
+
+#Proporción de missings por variable y observación
+input$prop_missings<-apply(is.na(input),1,mean)
+summary(input$prop_missings)
+
+(prop_missingsVars<-apply(is.na(input),2,mean))
+
+```
+
+Como no tenemos variables con más de un 50% de valores pérdidos no voy a eliminar ninguna variable.
+Paso a hacer imputaciones.
+
+Primero imputo las variables cuantitativas y después las cualitativas, ámbas por el método aletatorio
+
+```{r imputación aleatorio}
+#Variables cuantitativas
+
+input[,as.vector(which(sapply(input, class)=="numeric"))]<-sapply(
+Filter(is.numeric, input),function(x) Hmisc::impute(x,"random"))
+
+#Variables cualitativas
+
+input[,as.vector(which(sapply(input, class)=="factor"))]<-sapply(Filter(is.factor, input),function(x) ImputacionCuali(x,"aleatorio"))
+
+#Por si ha cambiado alguna variable cuantiativa factor a character, le indico que es factor
+
+input[,as.vector(which(sapply(input, class)=="character"))] <- lapply(
+  input[,as.vector(which(sapply(input, class)=="character"))] , factor)
+
+# Reviso que no queden datos missings
+any(is.na(input))
+
+#Para estar completamente segura de que no quedan missing en las variables cuantitativas vuelvo a pasar la función
+
+if (any(is.na(input))){
+input[,as.vector(which(sapply(input, class)=="numeric"))]<-sapply(
+  Filter(is.numeric, input),function(x) ImputacionCuant(x,"aleatorio"))}
+
+#Y vuelvo a revisar que no quedan missing
+any(is.na(input))
+
+```
+
+
+Finalmente, también categorizo la variable *Personas por inmueble* por cuartiles.
+
+```{r categorizar variables continuas}
+#Personas por inmuebles por cuartiles:
+
+q=quantile(input$PersInmb, prob=c(0,0.25,0.5,0.75,1))
+
+input$PersInmbCat<-cut(input$PersInmb, breaks = q,
+include.lowest = T, labels = c('1 persona','2 personas','3 personas','4 personas'))
+table(input$PersInmbCat)
+
+input$PersInmb=NULL
+
+
+#Por si ha cambiado alguna variable cuantiativa factor a character, le indico que es factor
+input[,as.vector(which(sapply(input, class)=="character"))] <- lapply(
+  input[,as.vector(which(sapply(input, class)=="character"))] , factor)
+
+
+```
+
+## Resultado de la depuración de datos
+
+```{r gráfico datos, warning=FALSE}
+
+par(mfrow=c(2,2))
+dfplot(input)
+datosEvaluacionDep<-cbind(varObjBin, varObjCont, input)
+
+```
+
+He tomado una serie de decisiones arriesgadas en la depuración de datos:
+  - Eliminar varias variables como municipios, provincias y CCAA
+  - Categorizar varias variables continuas creando alguna categoría poco representada
+  - Categorizar *CCAA* por zonas de cercanía
+  
+Otras decisiones que se podrían haber tomado son:
+  1.  Realizar las regresiones para una zona en concreto, ya sea por CCAA, Provincia o las propias zonas que he creado yo.
+  2.  Realizar las regresiones para un tipo de población en concreto, ya sea las que he creado yo de Pueblos, Pueblos Medios, Ciudades o Ciudades Grandes, o según un intervalo específico
+  3. Una combinación de ámbas
+
+
+## Guardar los datos depurados
+
+```{r guardar datos depurados}
+saveRDS(cbind(varObjBin,varObjCont,input),"datosEvaluacionDep")
+```
+
+# REGRESION LINEAL
+
+## Selección de variables 
+
+En este apartado vamos a ver la influencia de las variables input sobre las variables objetivo continua para seleccionar aquellas que verdaderamente influyan y construir el modelo de regresión lineal adecuado de manera manual.
+
+Partimos de los datos ya depurados y de las variables objetivo seleccionadas con anterioridad: *datosEvaluacionDep* y *varObjCont*
+
+```{r redefino datos con los datos depurados, warning=FALSE, include=FALSE}
+datos<-readRDS("datosEvaluacionDep")
+```
+
+### Creación de variables aleatorias
+
+El primer paso es crear variables aleatorias que teóricamente no deberían tener ninguna influencia sobre las objetivo, si las tuviera sería azar. Esto nos servirá para ver si existen variables input con todavía menor influencia que estas aleatorias, las cuales tendremos que rechazar ya que consideraremos que no explicarán la variabilidad de las objetivo.
+
+```{r variables aleatorias, warning=FALSE}
+input$aleatorio<-runif(nrow(input))
+input$aleatorio2<-runif(nrow(input))
+```
+
+### Análisis descriptivo de relación entre variables
+
+Vamos a evaluar el poder predictivo de las variables input sobre la objetivo continua.
+
+```{r gráficos, warning=FALSE}
+#V de cramer
+graficoVcramer(input,varObjCont)
+
+#Correlación
+corrplot(cor(cbind(varObjCont,Filter(is.numeric, input)), use="pairwise", method="pearson"), method = "ellipse",type = "upper")
+
+```
+
+Ranking de influencia:
+
+1. *Zonas*, era previsible ya que en España se vota por comunidades
+2. *ActividadPpal*, dependiendo de la actividad principal del municipio se vota a uno u otro partido
+3. *MismaComDifProv*, lo podría traducir como éxodo rural, cambios a otra provicia más grande dentro de la comunidad para búsqueda de trabajo
+4. *UnemplLess25*, paro en edades tempranas
+5. *ComercioBin*, la presencia de empresas de comercio, hostelería y transporte. Es normal, en España es el sector principal
+6. *ServiciosCat*, lo mismo, España es un país donde el sector Servicios tiene mayor peso, no me parece extraño que salga esta variable
+7. *UnemplMore40*, paro en edad más avanzada de trabajar
+8. *UnemplAgri*, desempleo en clases trabajadoras
+
+A priori, me parece que tiene sentido, pues historicamente las clases más trabajadoras, obreras y/o desfavorecidas son las que votan a la izquierda: cambios de provicia pero no de comunidad, paro en edades tempranas.
+
+Además, en el gráfico de correlación vemos como las variables de edad tienen correlaciones negativas, pues son contrapuestas
+
+### Transformación de variables
+
+Voy a buscar también alguna transformación automática de las variables input cuantitativas que maximicen la relación lineal con la objetivo, de esta manera tendrán mayor poder predictorio.
+  
+```{r transformaciones, warning=FALSE}
+input_cont<-cbind(input,Transf_Auto(Filter(is.numeric, input),varObjCont))
+
+# Cuento el número de valores diferentes para las numéricas 
+sapply(Filter(is.numeric, input)[,-ncol(Filter(is.numeric, input))],function(x) length(unique(x)))
+```
+
+## Guardar datos para la regresión
+
+```{r include=FALSE}
+saveRDS(data.frame(input_cont,varObjCont),"todo_cont_IA")
+```
+
+## Partición de datos
+
+Hago una participición de datos entre train y test (70-30%), sin incluir las variables transformadas automáticas.
+Partiendo de un modelo inicial completo iré hacia otros más ajustados, en todos ellos analizaré la R2 ajustada con el objetivo de encontrar el modelo más simplificado pero sin caer en perder mucha precisión.
+
+```{r comienzo regresión lineal y partición datos, warning=FALSE}
+todo<-data.frame(input,varObjCont)
+
+#Partición
+set.seed(1234)
+trainIndex <- createDataPartition(todo$varObjCont, p=0.7, list=FALSE)
+data_train <- todo[trainIndex,]
+data_test <- todo[-trainIndex,]
+```
+
+## Modelo completo
+
+```{r modelo completo, echo=TRUE, warning=FALSE}
+#Modelo con todas las variables
+modeloCompleto<-lm(varObjCont~.,data=data_train)
+#summary(modeloCompleto)
+
+Rsq(modeloCompleto,"varObjCont",data_train)
+Rsq(modeloCompleto,"varObjCont",data_test) 
+
+#Importancia de las variables
+barplot(sort(modelEffectSizes(modeloCompleto)$Effects[-1,4],decreasing =T),las=2,main="Importancia de las variables (R2)")
+```
+
+## Modelo 1
+
+Hago un modelo con las variables influyentes que he visto en el gráfico V de Cramer 
+
+```{r modelo 1, echo=TRUE}
+
+modelo1<-lm(varObjCont~Zonas+ActividadPpal+MismaComDifProv+UnemplLess25+ComercioBin+ServiciosBin+UnemplMore40+UnemplAgri,data=data_train)
+#summary(modelo1)
+
+#Valoración R2
+Rsq(modelo1,"varObjCont",data_train)
+Rsq(modelo1,"varObjCont",data_test) 
+
+```
+## Modelo 2
+
+Solo con *Zonas*, porque es la que siempre me sale más influyente
+
+```{r modelo 2, echo=TRUE}
+
+modelo2<-lm(varObjCont~Zonas,data=data_train)
+#summary(modelo2)
+
+#Valoración R2
+Rsq(modelo2,"varObjCont",data_train)
+Rsq(modelo2,"varObjCont",data_test) 
+
+```
+
+
+## Modelo 3
+
+El mismo que el 2 pero sin *Zonas*
+
+```{r modelo 3, echo=TRUE}
+
+modelo3<-lm(varObjCont~ActividadPpal+MismaComDifProv+UnemplLess25+ComercioBin+ServiciosBin+UnemplMore40+UnemplAgri,data=data_train)
+#summary(modelo3)
+
+#Valoración R2
+Rsq(modelo3,"varObjCont",data_train)
+Rsq(modelo3,"varObjCont",data_test) #pierdo muchisimo sin Zonas
+
+```
+
+## Modelo 4
+
+Incluyo algunas variables significativas según el modelo completo y que no incluían la 8 primeras escogidas en la V de Cramer
+
+```{r modelo 4, echo=TRUE}
+
+modelo4<-lm(varObjCont~Zonas+ActividadPpal+MismaComDifProv+UnemplLess25+ComercioBin+ServiciosBin+UnemplMore40+UnemplAgri+DifCom+Foreign+Age19_65,data=data_train)
+#summary(modelo4)
+
+#Valoración R2
+Rsq(modelo4,"varObjCont",data_train)
+Rsq(modelo4,"varObjCont",data_test) #mejor, casi como el completo, pruebo alguna interaccion
+
+```
+## Modelo 5
+
+Pruebo uno con las primeras variables que se repiten en V de cramer y en R2
+
+```{r modelo 5, echo=TRUE}
+
+modelo5<-lm(varObjCont~Zonas+ActividadPpal+UnemplLess25+UnemplAgri,data=data_train)
+#summary(modelo5)
+
+#Valoración R2
+Rsq(modelo5,"varObjCont",data_train)
+Rsq(modelo5,"varObjCont",data_test) #nada
+
+```
+## Modelo 6
+
+Voy a incluir al 4 la variable categorizada de *CensoCat* a ver si tiene efecto
+
+```{r modelo 6, echo=TRUE}
+modelo6<-lm(varObjCont~Zonas+ActividadPpal+MismaComDifProv+UnemplLess25+ComercioBin+ServiciosBin+UnemplMore40+UnemplAgri+DifCom+Foreign+Age19_65+CensoCat,data=data_train)
+#summary(modelo6)
+
+#Valoración R2
+Rsq(modelo6,"varObjCont",data_train)
+Rsq(modelo6,"varObjCont",data_test) #Mejor
+
+```
+## Modelo 7
+
+Añado *NEmprCat*
+
+```{r modelo 7, echo=TRUE}
+modelo7<-lm(varObjCont~Zonas+ActividadPpal+MismaComDifProv+UnemplLess25+ComercioBin+ServiciosBin+UnemplMore40+UnemplAgri+DifCom+Foreign+Age19_65+CensoCat+NEmprCat,data=data_train)
+#summary(modelo7)
+
+#Valoración R2
+Rsq(modelo7,"varObjCont",data_train)
+Rsq(modelo7,"varObjCont",data_test) #Disminuye, quito la variable
+
+```
+
+## Modelo 8
+
+*CensoCat* ha sido bastante influyente, pruebo su iteración con Foreign 
+
+```{r modelo 8, echo=TRUE}
+modelo8<-lm(varObjCont~Zonas+ActividadPpal+MismaComDifProv+UnemplLess25+ComercioBin+ServiciosBin+UnemplMore40+UnemplAgri+DifCom+Foreign+Age19_65+CensoCat+CensoCat:Foreign,data=data_train)
+#summary(modelo8)
+
+#Valoración R2
+Rsq(modelo8,"varObjCont",data_train)
+Rsq(modelo8,"varObjCont",data_test) #Aumenta
+
+```
+## Modelo 9
+
+Algún otro
+
+```{r modelo 9, echo=TRUE}
+modelo9<-lm(varObjCont~Zonas+MismaComDifProv+UnemplLess25+ActividadPpal+UnemplAgri+CensoCat+CensoCat:Foreign+IndConstBin+ServiciosBin,data=data_train)
+#summary(modelo9)
+
+#Valoración R2
+Rsq(modelo9,"varObjCont",data_train)
+Rsq(modelo9,"varObjCont",data_test) #Disminiye
+
+```
+## Modelo 10
+
+Añado mujeres al mejor ver si influye
+
+```{r modelo 10, echo=TRUE}
+modelo10<-lm(varObjCont~Zonas+ActividadPpal+MismaComDifProv+UnemplLess25+ComercioBin+ServiciosBin+UnemplMore40+UnemplAgri+DifCom+Foreign+Age19_65+CensoCat+CensoCat:Foreign+Women,data=data_train)
+#summary(modelo10)
+
+#Valoración R2
+Rsq(modelo10,"varObjCont",data_train)
+Rsq(modelo10,"varObjCont",data_test) #Mejora
+
+```
+
+## Modelo automatico con método Forward
+
+Pruebo un modelo automático para comparar, pues probablemente me saldrán mucho coeficientes
+
+```{r modelo forward, include=FALSE}
+
+null<-lm(varObjCont~1,data=data_train)
+full<-lm(varObjCont~.,data=data_train)
+modeloF<-step(null, scope=list(lower=null, upper=full), direction='forward')
+#summary(modeloF)
+
+#Valoración R2
+Rsq(modeloF,"varObjCont",data_train)
+Rsq(modeloF,"varObjCont",data_test)
+
+```
+
+## Comprobación de modelos con Validación Cruzada Repetida
+
+Voy a hacer validación cruzada con los 10 modelos manuales, el completo y el automático.
+
+```{r Comparacion por CV rep, warning=FALSE, include=FALSE}
+
+total<-c()
+modelos<-sapply(list(modeloCompleto,modelo1, modelo2, modelo3, modelo4, modelo5, modelo6, modelo7, modelo8, modelo9, modelo10, modeloF),formula)
+
+for (i in 1:length(modelos)){
+  set.seed(1712)
+  vcr<-train(as.formula(modelos[[i]]), data = todo,
+             method = "lm",
+             trControl = trainControl(method="repeatedcv", number=5, repeats=20,returnResamp="all")
+  )
+  total<-rbind(total,data.frame(vcr$resample,modelo=rep(paste("Modelo",i),
+                                                                nrow(vcr$resample))))
+}
+
+
+```
+## Elección del modelo ganador
+
+```{r}
+boxplot(Rsquared~modelo,data=total,main="Precisión de los modelos") 
+aggregate(Rsquared~modelo, data = total, mean) 
+aggregate(Rsquared~modelo, data = total, sd) 
+
+# Número de parámetros por modelo
+length(coef(modeloCompleto))
+length(coef(modelo1))
+length(coef(modelo2))
+length(coef(modelo3))
+length(coef(modelo4))
+length(coef(modelo5))
+length(coef(modelo6))
+length(coef(modelo7))
+length(coef(modelo8))
+length(coef(modelo9))
+length(coef(modelo10))
+length(coef(modeloF))
+
+```
+El modelo completo y el del método Forward son los mejores en cuanto a R2 pero también tienen muchos coeficientes.
+
+El modelo 4 que quitaba la variable *Zonas* claramente tampoco lo voy a elegir.
+
+Entre el 7 y 10, como tienen los mismo coeficientes, rechazo el 7 
+
+Entre el 9, 10 y 11 apenas cambia el R2, por tener menor número de parámetros el escogido es el 10 (nombre = modelo9)
+
+```{r modelo ganador}
+
+coef(modelo9)
+summary(modelo9)
+
+```
+
+
+$$ \hat{Izda_Pct} = 44.69297 -13.27933  ZonasLevante  -20.48123 Zona Nacionalistas +6.01826 Zona Noreste -10.17795 Zona Norte +13.13781 Zona Sur -0.21625 Misma Com Dif Prov + 0.11943 UnemplLess25 -5.12560 ActividadPpalConst&Ind -5.62205 ActividadPpalOtro -4.09362 ActividadPpalServicios + 0.07772 Unempl Agri -0.68527 Censo Ciudad Grande -6.70177 Censo Pueblo -0.86110 Censo Pueblo Medio -2.08591 IndConstBin1 -1.40094 ServiciosBin1 -0.20620 CensoCatCiudad:Foreign + 0.11352 CensoCatCiudad Grande:Foreign +0.05838 CensoCatPueblo:Foreign  -0.17898 CensoCatPueblo Medio:Foreign $$ 
+
+## Interpretación de parámetros
+
+Interpreto dos parámetros del modelo:
+
+- Binaria: Zona Sur = 1 --> Pertenecer a la zona Sur hace que aumente el porcentaje de votos a la izquierda en 13.13781 unidades, permaneciendo constantes el resto de variables.
+
+- Continua: Unempl<25 --> El aumento unitario en el desempleo en menores de 25 años hace que el porcentaje de votos a la izquierda aumente en 0.11943 unidades, permaneciendo constantes el resto de variables.
+
+
+# REGRESIÓN LOGÍSTICA
+
+Este apartado consiste en realizar una regresión logística para la variable binaria *Izquierda*, es decir, que variables influyen en que los votos a la izquierda sean mayores que a la derecha.
+
+Parto de los datos con variables transformadas.
+
+```{r ver binaria, echo=FALSE}
+#transformaciones de la binaria
+input_bin<-cbind(input,Transf_Auto(Filter(is.numeric, input),varObjBin))
+
+saveRDS(data.frame(input_bin,varObjBin),"todo_bin") 
+todo<-readRDS("todo_bin")
+
+freq(todo$varObjBin)
+```
+
+## Selección de variables
+
+Al igual que he hecho al empezar la regresión lineal voy a ver las variables más influyentes sobre mi variable objetivo binaria.
+
+Las variables aleatorias para comparar ya las tengo del modelo anterior.
+
+```{r v de cramer binaria}
+graficoVcramer(input,varObjBin)
+
+```
+Ranking de influencia:
+
+1. *Zonas*, como antes...
+2. *UnemplLess25*
+3. *UnemplAgri*
+4. *UnemplMore40*
+5. *ActividadPpal*
+6. *Explotaciones*
+7. *CensoCat*
+8. *Superficie*
+
+
+```{r eval=FALSE, include=FALSE}
+#Gráficos de un par de cualitativas
+par(mfrow=c(1,2))
+mosaico_targetbinaria(input$Zonas,varObjBin,"Zonas") 
+mosaico_targetbinaria(input$CensoCat,varObjBin,"Censo") 
+barras_targetbinaria(input$Zonas,varObjBin,"Zonas")
+barras_targetbinaria(input$CensoCat,varObjBin,"Censo") 
+
+#Gráficos de las dos nuevas con respecto a la regresión lineal
+boxplot_targetbinaria(input$Explotaciones,varObjBin,"Explotaciones")
+boxplot_targetbinaria(input$Superficie,varObjBin,"Superficie")
+hist_targetbinaria(input$Explotaciones,varObjBin,"Explotaciones")
+hist_targetbinaria(input$Superficie,varObjBin,"Superficie")
+```
+
+
+## Partición de datos
+
+La misma partición que con el modelo de regresión lineal: misma semilla y porcentaje. Además, de momento quitaré las variables transformadas.
+
+```{r train test}
+set.seed(1234)
+trainIndex <- createDataPartition(todo$varObjBin, p=0.7, list=FALSE)
+data_train <- todo[trainIndex,c(1:32,55)]
+data_test <- todo[-trainIndex,c(1:32,55)]
+
+```
+
+## Modelo completo (1) sin transformaciones
+
+```{r fig.height=5, fig.width=7}
+modelo1<-glm(varObjBin~.,data=data_train,family=binomial)
+#summary(modelo1)
+pseudoR2(modelo1,data_train,"varObjBin")
+pseudoR2(modelo1,data_test,"varObjBin")
+modelo1$rank 
+
+impVariablesLog(modelo1,"varObjBin")
+
+```
+### Modelos con variables más importantes
+
+Con las dadas por el V de cramer y por la importancia en el modelo completo
+
+```{r}
+#Modelo 2 -> sin zonas
+
+modelo2<-glm(varObjBin~UnemplLess25+UnemplAgri+UnemplMore40+ActividadPpal+Explotaciones+CensoCat+Superficie,data=data_train,family=binomial)
+#summary(modelo2)
+pseudoR2(modelo2,data_train,"varObjBin")
+pseudoR2(modelo2,data_test,"varObjBin")#muy muy bajo
+modelo2$rank
+
+impVariablesLog(modelo2,"varObjBin") 
+
+# Modelo 3 -> con zonas
+
+modelo3<-glm(varObjBin~Zonas+UnemplLess25+UnemplAgri+UnemplMore40+ActividadPpal+Explotaciones+CensoCat+Superficie,data=data_train,family=binomial)
+#summary(modelo3)
+pseudoR2(modelo3,data_train,"varObjBin")
+pseudoR2(modelo3,data_test,"varObjBin")#si incluyo Zonas que es la variable siempre de más peso ya es completamente diferente
+modelo3$rank #suben 5 parámetros
+
+# Modelo 4
+
+modelo4<-glm(varObjBin~Zonas+UnemplLess25+UnemplAgri+UnemplMore40+ActividadPpal+Explotaciones+CensoCat+Superficie+Women+Foreign,data=data_train,family=binomial)
+#summary(modelo4)
+pseudoR2(modelo4,data_train,"varObjBin")
+pseudoR2(modelo4,data_test,"varObjBin")#Pongo más variables y baja, las quito
+modelo4$rank 
+
+```
+
+### Modelos clásicos sin transformaciones
+
+A continuación, realizamos un análisis automático de selección de variables por varios un par de métodos clásicos. Veo su Pseudo-R2 y número de parámetros.
+
+Me salieron iguales con el método Step y Back.
+
+```{r, warning=F}
+null<-glm(varObjBin~1, data=data_train, family = binomial) #Modelo minimo
+full<-glm(varObjBin~., data=data_train, family = binomial) #Modelo maximo sin transformaciones
+
+modeloStepAIC<-step(null, scope=list(lower=null, upper=full), trace=0, direction="both")
+modeloBackBIC<-step(full, scope=list(lower=null, upper=full), trace=0, direction="backward",k=log(nrow(data_train)))
+
+pseudoR2(modeloStepAIC,data_test,"varObjBin")
+modeloStepAIC$rank
+modeloStepAIC$formula
+
+pseudoR2(modeloBackBIC,data_test,"varObjBin")
+modeloBackBIC$rank 
+modeloBackBIC$formula 
+
+```
+
+El mejor hasta ahora es el BackBIC, voy a probar incluir alguna variable del ranking del modelo completo
+
+```{r}
+# Modelo 5
+
+modelo5<-glm(varObjBin~Zonas + Age19_65 + Foreign + DifCom + UnemplLess25 + UnemplAgri + ActividadPpal + UnemplMore40,data=data_train,family=binomial)
+#summary(modelo4)
+pseudoR2(modelo5,data_train,"varObjBin")
+pseudoR2(modelo5,data_test,"varObjBin") 
+modelo5$rank
+
+# Modelo 6
+
+modelo6<-glm(varObjBin~Zonas + Age19_65 + Foreign + DifCom + UnemplLess25 + UnemplAgri + ActividadPpal + UnemplMore40 + MismaComDifProv,data=data_train,family=binomial)
+#summary(modelo4)
+pseudoR2(modelo6,data_train,"varObjBin")
+pseudoR2(modelo6,data_test,"varObjBin") 
+modelo6$rank 
+
+```
+
+## Modelos con iteraciones
+
+Voy a probar alguna interación, no las completas ya que me daban más de 1000 parámetros
+
+```{r}
+#formInt<-formulaInteracciones(todo[,c(1:32,55)],33)
+#fullInt<-glm(formInt, data=data_train, family = binomial)
+#summary(fullInt)
+#pseudoR2(fullInt,data_test,"varObjBin")
+#fullInt$rank --> unalocura! 
+
+# Modelo 6 con interación
+
+modelo6i<-glm(varObjBin~Zonas + Age19_65 + Foreign + DifCom + UnemplLess25 + UnemplAgri + ActividadPpal + UnemplMore40 + MismaComDifProv+UnemplLess25:UnemplAgri,data=data_train,family=binomial)
+#summary(modelo6i)
+pseudoR2(modelo6i,data_train,"varObjBin")
+pseudoR2(modelo6i,data_test,"varObjBin") 
+modelo6i$rank #23 parámetros y mejora muy poco
+
+# Modelo 7
+
+modelo7<-glm(varObjBin ~ Age19_65 + Foreign + MismaComDifProv + DifCom + UnemplLess25:UnemplAgri + Zonas,data=data_train,family=binomial)
+#summary(modelo7)
+pseudoR2(modelo7,data_train,"varObjBin")
+pseudoR2(modelo7,data_test,"varObjBin") 
+modelo7$rank
+
+```
+
+## Modelos con transformaciones
+
+```{r}
+#Incluyo transformaciones
+
+data_train <- todo[trainIndex,c(1:54,55)]
+data_test <- todo[-trainIndex,c(1:54,55)]
+
+null<-glm(varObjBin~1, data=data_train, family = binomial) #Modelo minimo
+full<-glm(varObjBin~., data=data_train, family = binomial) #Modelo maximo con transformaciones
+
+modeloStepAIC<-step(null, scope=list(lower=null, upper=full), trace=0, direction="both")
+#summary(modeloStepAIC)
+pseudoR2(modeloStepAIC,data_test,"varObjBin")
+modeloStepAIC$rank
+
+modeloBackAIC<-step(full, scope=list(lower=null, upper=full), trace=0, direction="backward")
+#summary(modeloBackAIC)
+pseudoR2(modeloBackAIC,data_test,"varObjBin") 
+modeloBackAIC$rank
+
+modeloStepBIC<-step(null, scope=list(lower=null, upper=full), trace=0, direction="both",k=log(nrow(data_train)))
+#summary(modeloStepBIC)
+pseudoR2(modeloStepBIC,data_test,"varObjBin") # el mejor
+modeloStepBIC$rank
+modeloStepBIC$formula
+
+modeloBackBIC<-step(full, scope=list(lower=null, upper=full), trace=0, direction="backward",k=log(nrow(data_train)))
+#summary(modeloBackBIC)
+pseudoR2(modeloBackBIC,data_test,"varObjBin") #Igual
+modeloBackBIC$rank
+
+```
+## Modelos con transformaciones e interaciones
+
+Combino entre el mejor modelo de las transformaciones y el de interacciones
+
+```{r}
+modelo8<-glm(varObjBin~Zonas + Age19_65 + Foreign + DifCom + UnemplLess25 + UnemplAgri + ActividadPpal + UnemplMore40 + MismaComDifProv+UnemplLess25:UnemplAgri+raiz4DifCom++ sqrtxMismaComDifProv,data=data_train,family=binomial)
+#summary(modelo8)
+pseudoR2(modelo8,data_train,"varObjBin")
+pseudoR2(modelo8,data_test,"varObjBin") 
+modelo8$rank
+
+```
+
+
+## Validación cruzada repetida
+
+Tras haber hecho varios modelos, primero con los datos depurados, después con interacciones entre ellos, luego con transformaciones y luego con transformaciones e interaciones, voy a hacer validad cruzada repetida de los mejores para elegir el modelo ganador.
+
+```{r}
+auxVarObj<-todo$varObjBin
+todo$varObjBin<-make.names(todo$varObjBin) #formateo la variable objetivo para que funcione el codigo
+total<-c()
+modelos<-sapply(list(modelo1,modelo3,modelo4,modeloBackBIC,modelo5,modelo6,modelo6i,modelo7,modeloStepBIC,modelo8),formula)
+for (i in 1:length(modelos)){
+  set.seed(1712)
+  vcr<-train(as.formula(modelos[[i]]), data = todo,
+             method = "glm", family="binomial",metric = "ROC",
+             trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                                      summaryFunction=twoClassSummary,
+                                      classProbs=TRUE,returnResamp="all")
+  )
+  total<-rbind(total,data.frame(roc=vcr$resample[,1],modelo=rep(paste("Modelo",i),
+                                                                  nrow(vcr$resample))))
+}
+
+boxplot(roc~modelo,data=total,main="Área bajo la curva ROC") #el 3 es peor, los otros parecidos
+aggregate(roc~modelo, data = total, mean) 
+aggregate(roc~modelo, data = total, sd) #muy similar
+
+
+#recupero la variable objetivo en su formato
+todo$varObjBin<-auxVarObj
+
+#miro el numero de parametros
+modelo1$rank
+modelo3$rank 
+modelo4$rank
+modeloBackBIC$rank
+modelo5$rank #Tiene menos parámetros y funciona prácticamente igual
+modelo6$rank
+modelo6i$rank
+modelo7$rank
+modeloStepBIC$rank
+modelo8$rank
+
+```
+
+## Elección del modelo ganador
+
+El primero lo rechazamos porque tiene muchos parámetros.
+El 2 y 3 salen muy bajitos.
+4, 6 y 7 parecen iguales, siendo mejor el 4 por Roc y número de parámetros.
+El 4 y el 9 son iguales. El 10 es el mejor pero no mejora tanto en comparación con el número de párametros que tiene.
+Me quedo con el 9 que es el modeloStepBIC
+
+```{r, warning=FALSE}
+
+# Vemos los coeficientes del modelo ganador
+coef(modeloStepBIC)
+logistic.display(modeloStepBIC)
+```
+
+
+## Interpretación de parámetros
+
+Interpreto los mismos que en la regresión lineal:
+
+  - Cuantitativa: EL aumento unitario en el desempleo en menores de 25 años (*UnemmplLess25*) aumenta el **OR** en  1.02 unidades.  
+  
+  - Binaria: La probabilidad de que haya votos a la Izquierda es 11.29 veces mayor (aumenta el **OR**) si es de la Zona Sur que si es de la Zona Centro. 
+
+
+
