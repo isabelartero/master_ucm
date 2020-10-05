@@ -1,0 +1,396 @@
+---
+title: "Serie Temporal Oro 2007 - 2019"
+author: "Isabel Artero"
+date: "5/10/2020"
+output: html_document
+---
+
+# SERIE TEMPORAL
+
+Serie temporal sobre la cotización real del oro en dolares estadounidenses por onza (USD/oz). Los datos son mensuales desde enero de 2007 hasta diciembre de 2019, ambos incluidos.
+
+Fuente: Comisión Chilena del Cobre, pertenciente al Gobierno de Chile.
+https://www.cochilco.cl/Paginas/Estadisticas/Bases%20de%20Datos/Precio-de-los-Metales.aspx 
+
+```{r preparacion, include=FALSE}
+# Directorio de trabajo
+setwd('C:/Users/isabe/OneDrive/Escritorio/M/4 Minería de datos y modelización predictiva/Evaluacion_Guille/FINAL')
+
+# Cargo las funciones que utilizaré
+source("Funciones_R.R")
+
+# Librerías
+paquetes(c('readxl','fpp2','tseries','forecast','ggplot2','seasonal','descomponer','TSA', 'stats', 'TSstudio'))
+
+```
+
+## Inspección de datos y conversión a serie temporal
+
+Al transformar los datos en una serie temporal por el método multiplicativo observamos que la serie no es estacionaria, no tiene ruido blanco, y cuenta con tendencia y estacionalidad. Es una variable no estacionaria en media y varianza.
+
+*Descripción de la tendencia:*
+
+Desde el inicio de la serie y hasta septiembre de 2011, donde el oro alcanzó su máximo histórico, la cotización del oro subió bastante. En 2012 las existencias de oro eran muy altas y con la coyuntura económica europea en plena crisis los precios comenzaron a decrecrer hasta aprox. 2016, siendo más pronunciada durante en los primeros años.
+
+Desde 2016 la tendencia vuelve ser al alza, aunque en menor medida que en los años 2007-2012.En este último año 2019 se vuelven a alcanzar valores bastante elevados, los que preocupa a los analistas ya que puede ser señal de una nueva recesión.
+
+*Descripción de la estacionalidad:*
+
+La cotización del oro presenta ciclos anuales, empieza con valores máximos para ir bajando, también encontramos un pico menos pronuncionado alrededor de agosto-septiembre. 
+
+```{r inspección de datos y conversión a serie temporal, echo=TRUE}
+# Datos Oro
+oro<-read_excel("oro.xlsx")
+
+head(oro)
+str(oro)
+
+# Convertir en serie temporal 
+# Serie mensual desde enero de 2007 y visualización
+oro_serie <- ts(oro[,2], start=c(2007,1), frequency=12)
+autoplot(oro_serie, facets=TRUE)
+
+#Descomposición multiplicativa
+oro_serie_desc<- decompose(oro_serie, type='multiplicative')
+autoplot(oro_serie_desc)
+
+#extra
+ts_decompose(oro_serie, type='multiplicative')
+
+```
+
+Veo un poco más en detalle la estacionalidad del precio del oro.
+
+Para ello voy a también voy usar la funcion ts_seasonal del paquete TSstudio, es interesante porque tiene diferentes versiones de ver el gráfico (type = all muestra todas) y además es interactiva.
+
+No hay una tendencia nada marcada, podemos ver que en los meses de agosto y septiembre sube un poquito (lo tendré en cuenta para comparar un arima con y sin estacionalidad).
+
+También veo que la serie no es estacionaria, pues lo residuos no tienen media 0
+
+```{r}
+# Ver estacionalidad
+
+#Coeficientes debidos a la estacionalidad
+oro_serie_desc$figure
+#Análisis gráfico de la estacionalidad
+ggseasonplot(oro_serie, year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("USD/oz") +  ggtitle("Gráfico de estacionalidad: Cotización del oro")
+
+#Extra
+ts_seasonal(oro_serie, type = 'all')
+
+# Representacion de residuos
+autoplot(oro_serie_desc$random)
+mean(oro_serie_desc$random, na.rm = T) 
+sd(oro_serie_desc$random, na.rm = T)
+
+## Contraste de normalidad de los residuos
+ks.test(oro_serie_desc$random,'pnorm')
+shapiro.test(oro_serie_desc$random)
+
+
+# Periodograma 
+gperiodograma(oro_serie)
+gperiodograma(diff(log(oro_serie)))
+
+
+```
+
+
+## Métodos de suavizado exponencial
+
+Tras separar la serie en train y test (último año, 2019) para poder validar los modelos, realizo los diferentes métodos de suavizado exponencial:
+
+  - Suavizado exponencial simple
+  - Suavizado de Doble Holt
+  - Suavizado de Holt Winters aditivo
+  - Suavizado de Holt Winters multiplicativo
+  - ETS predictivo
+  
+A continuación, se presentan los gráficos de los valores observados y suavizados, y la predicción de 2019 para todos ellos:
+
+```{r particion train test , echo=TRUE}
+# Divido train y test (test último año)
+oro_tr<-window(x = oro_serie, end = c(2018,12))
+oro_tst<-window(x = oro_serie, start = c(2019,1))
+
+```
+
+```{r simple, include=FALSE}
+## Suavizado exponencial simple 
+oro_s1=ses(oro_tr, h=8)
+
+# Inspección del suavizado y distribución de residuos
+print(oro_s1)
+oro_s1$model 
+autoplot(oro_s1$residuals)
+
+#Representamos los valores observados y los suavizados con la predicción 
+autoplot(oro_s1) +
+  autolayer(fitted(oro_s1), series="suavizado")+autolayer(oro_tst, series="real") +
+  ylab("Cotización oro") + xlab("Mes/Año")
+
+```
+
+```{r doble holt, include=FALSE}
+## Suavizado exponencial Doble de Holt
+oro_sh <- holt(oro_tr, h=8)
+
+# Inspección del suavizado y distribución de residuos
+print(oro_sh)
+oro_sh$model
+autoplot(oro_sh$residuals)
+
+#Representamos los valores observados y los suavizados con la predicción 
+autoplot(oro_sh) +
+  autolayer(fitted(oro_sh), series="suavizado") +autolayer(oro_tst, series="real") +
+  ylab("cotización oro") + xlab("Mes/Año")
+
+```
+
+```{r holt winters, include=FALSE}
+## Suavizado Holt Winters por método aditivo y multiplicativo 
+oro_hw_aditivo <- hw(oro_tr, h=8, level = c(80, 95))
+oro_hw_multi <- hw(oro_tr, seasonal='multiplicative', h=8, level = c(80, 95))
+
+# Ajuste de modelo
+print(oro_hw_aditivo)
+print(oro_hw_multi)
+oro_hw_aditivo$model
+oro_hw_multi$model
+autoplot(oro_hw_aditivo$residuals)
+autoplot(oro_hw_multi$residuals)
+
+#Visualización
+autoplot(oro_hw_aditivo) + 
+  autolayer(fitted(oro_hw_aditivo), series="suavizado") +autolayer(oro_tst, series="real") +
+  ylab("Cotización oro") + xlab("Año")
+
+autoplot(oro_hw_multi) + 
+  autolayer(fitted(oro_hw_multi), series="suavizado") +autolayer(oro_tst, series="real") +
+  ylab("Cotización oro") + xlab("Año")
+
+```
+
+
+```{r graficos, echo=FALSE}
+# Exponencial simple
+autoplot(oro_s1) +
+  autolayer(fitted(oro_s1), series="suavizado")+autolayer(oro_tst, series="real") +
+  ylab("Cotización oro") + xlab("Mes/Año")
+
+# Doble Holt
+autoplot(oro_sh) +
+  autolayer(fitted(oro_sh), series="suavizado") +autolayer(oro_tst, series="real") +
+  ylab("cotización oro") + xlab("Mes/Año")
+
+# Holt-Winters aditivo
+autoplot(oro_hw_aditivo) + 
+  autolayer(fitted(oro_hw_aditivo), series="suavizado") +autolayer(oro_tst, series="real") +
+  ylab("Cotización oro") + xlab("Año")
+
+# Holt-Winters multiplicativo
+autoplot(oro_hw_multi) + 
+  autolayer(fitted(oro_hw_multi), series="suavizado") +autolayer(oro_tst, series="real") +
+  ylab("Cotización oro") + xlab("Año")
+
+
+```
+
+## Comparativa de los métodos de suavizado exponencial
+
+Tras realizar los anteriores método de suavizado veo la precisión de cada uno de ellos.
+Comparativamente, veo que el método del Holt Winters multiplicativo es el mejor ya que tiene menor RMSE en test, por tanto, el que más precisión me dará a la hora de hacer predicciones para meses posteriores.
+
+```{r}
+# Precisión de las distintas predicciones
+accuracy(oro_s1,oro_tst)
+accuracy(oro_sh,oro_tst)
+accuracy(oro_hw_aditivo,oro_tst)
+accuracy(oro_hw_multi,oro_tst) 
+
+```
+
+```{r eval=FALSE, include=FALSE}
+### TRANSFORMACIÓN A SERIE ESTACIONARIA 
+
+# Eliminar la heterocedasticidad = eliminar la variabilidad de la varianza
+OroLog<-log(oro_serie)
+
+# Gráficamente
+ts.plot(OroLog, main= 'Cotización del oro. Estabilización de la varianza', 
+        gpars=list(xlab="year", ylab="log(oro)", lty=c(1:3)))
+
+# Eliminar tendencia
+OroLog.diff_1<-diff(OroLog)
+
+# Gráficamente
+ts.plot(OroLog.diff_1, main= 'Cotización del oro. Eliminar tendencia', 
+        gpars=list(xlab="year", ylab="log(oro)", lty=c(1:3)))
+abline(h=0)
+
+# Eliminar estacionalidad
+OroLog.diff_1_12<-diff(OroLog.diff_1, lag = 12)
+
+# Gráficamente
+ts.plot(OroLog.diff_1_12, main= 'Cotización del oro. Diferenciacion estacional', 
+        gpars=list(xlab="year", ylab="log(oro)", lty=c(1:3)))
+abline(h=0)
+
+## Contraste de normalidad de los residuos
+ks.test(OroLog.diff_1_12,'pnorm')
+shapiro.test(OroLog.diff_1_12) #H0 = distribución normal --> no puedo recharla 
+```
+
+## Autocorrelación
+
+A continuación, voy a ver si la serie esta autocorrelacionada, es decir, si las predicciones futura vienen explicadas por los valores anteriores y no por variables independientes.
+
+### Correlograma con método ACF y PACF para la serie
+
+En el ACF vemos que tiene un decrecimiento lento, habrá que hacerlo con la serie diferenciada ya que esta no es estacionaria.
+
+La función PACF no considera los posibles efectos que pudieran ocurrir intermedios. En este caso la primera barra es muy significativa ya que es la correlación con el primer retardo, el segundo ya no es tan significativo. 
+
+```{r ACF y PACF 48 retardos}
+ggAcf(oro_serie, lag=48) 
+ggPacf(oro_serie, lag=48) 
+
+```
+
+### Comprobación de número de diferenciaciones
+
+El decrecimiento progresivo del ACF así como los gráficos de la serie que he observado al principio, me indican que mi serie no es estacionaria. Compruebo cuantas diferenciaciones debo hacer para convertirla en estacionaria y así poder hacer predicciones.
+
+```{r}
+# Diferenciaciones para la parte regular
+ndiffs(oro_serie)
+
+#Diferenciaciones necesarias para eliminar estacionalidad
+nsdiffs(oro_serie)
+
+```
+
+### Correlograma con método ACF y PACF para la serie diferenciada
+
+Aquí observamos que la autocorrelación decrece aunque en el período 1 sigue siendo significativa como me indicaba el PACF anterior.
+
+```{r ACF y PACF 48 retardos serie diff}
+ggAcf(diff(log(oro_serie)), lag=48) 
+ggPacf(diff(log(oro_serie)), lag=48)
+
+```
+
+## ARIMA
+
+Tras ver que existe autocorrelación paso a hacer el modelo ARIMA(2,1,1)(0,1,1).
+
+Nota: he probado varias opciones, con y sin estacionalidad y el que sigue es el mejor.
+
+
+```{r arima}
+arima_oro <- oro_serie %>%  Arima(order=c(2,1,1),seasonal = c(0,1,1))
+
+cbind("Cotización del oro" = oro_serie,
+      "Valores ajustados" =fitted(arima_oro)) %>%
+  autoplot() + xlab("Año") + ylab("") +
+  ggtitle("Cotización del oro observada y ajustada. Arima(2,1,1)(0,1,1)")
+
+```
+
+## Autoarima
+
+También hago un Arima de manera automática para poder compararlos
+
+```{r autoarima}
+autoarima_oro <- auto.arima(oro_serie,seasonal=TRUE)
+
+cbind("Cotización del oro" = oro_serie,
+      "Valores ajustados" =fitted(autoarima_oro)) %>%
+  autoplot() + xlab("Año") + ylab("") +
+  ggtitle("Cotización del oro observada y ajustada. Autorima")
+
+```
+
+## Comparativa de modelos Arima y Auto-arima
+
+Observo que mi modelo Arima es más preciso que el auto-arima
+
+```{r}
+# Coeficientes del modelos
+arima_oro
+autoarima_oro
+
+# Accuracy 
+round(accuracy(arima_oro),3)
+round(accuracy(autoarima_oro),3)
+
+# Predicciones
+cbind("Cotización del oro" = oro_serie,
+      "Valores ajustados" =fitted(autoarima_oro)) %>%
+  autoplot() + xlab("trimestre") + ylab("") +
+  ggtitle("Cotización del oro observada y ajustada")
+
+```
+## Ventana train-test
+
+Al igual que hice con los métodos de suavizado exponencial, voy a abrir una ventana que me permita validar los modelos y hacer predicciones.
+
+Vuelvo a corroborar que mi modelo ARIMA es mejor.
+
+```{r}
+# Ventanas de ajuste y evaluación 
+oro_serie_tr<-window(x = oro_serie, end = c(2017,12))
+oro_serie_tst<-window(x = oro_serie, start = c(2018))
+
+#Ajuste manual y visualización de residuos
+arima_oro_tr<- Arima(oro_serie_tr,order=c(2,1,1),seasonal=c(0,1,1))
+autoarima_oro_tr<-auto.arima(oro_serie_tr,seasonal=TRUE) #PONER MANUAL LO QUE SALGA EN EL AUTOARIMA
+
+# Estudio de residuos
+autoarima_oro_tr %>% residuals() %>% ggtsdisplay()
+checkresiduals(arima_oro_tr)
+checkresiduals(autoarima_oro_tr)
+
+# Valores de Ajuste en training
+accuracy(arima_oro_tr)
+accuracy(autoarima_oro_tr)
+
+## Predicciones 
+pred<-forecast(arima_oro_tr, h=7)
+pred_auto<-forecast(autoarima_oro_tr, h=7)
+
+## Respresentación
+pred %>% autoplot() + autolayer(oro_serie_tst, series = 'Real')
+pred_auto %>% autoplot() + autolayer(oro_serie_tst, series = 'Real')
+
+## Valores de ajuste en test
+accuracy(pred,oro_serie_tst)
+accuracy(pred_auto,oro_serie_tst)
+
+# Representación conjunta un poco más visible
+autoplot(pred$mean,series='Pred1')+autolayer(pred_auto$mean, series='Pred Auto')+
+  autolayer(oro_serie_tst, series='Real')
+
+```
+
+## Predicción con el modelo ganador
+
+El modelo Arima(2,1,1)(0,1,1)[12] es el que mejor precisión ha tenido de todos (incluso mejor que el de suavizado exponencial ganador), ya puedo realizar predicciones a futuro con él.
+
+    Fórmula: yt = c + 0.0998y t-1 + 0.0871y t-2  + 0.0676 et-1  + 0.1265e t-2 + et
+
+
+```{r}
+accuracy(oro_hw_multi,oro_tst) 
+accuracy(pred,oro_serie_tst)
+
+```
+
+Para los siguientes 7 meses (primero 7 meses de 2020) se espera una subida del precio del oro hasta abril bastante alta, para luego decrecer y volver a subir ligeramente. A continuación se observa gráficamente y la tabla de valores y los intervalos de confianza del 80 y 95%.
+
+```{r predicción futura}
+pred_fu<-forecast(arima_oro, h=7)
+autoplot(pred_fu$mean, series='Pred_fu')
+pred_fu
+```
