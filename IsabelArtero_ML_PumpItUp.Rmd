@@ -1,0 +1,646 @@
+---
+title: "PUMP IT UP de Datadriven"
+author: "Isabel Artero "
+date: "Abril 2020"
+output:
+  html_document:
+    df_print: paged
+    toc_depth: 3
+    number_sections: true 
+    theme: yeti
+    highlight: tango
+    code_folding: hide
+    fig_width: 9
+    fig_height: 7
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+---
+
+# Preparar dataframe
+
+## Cargar librerias
+
+```{r librerias, warning=FALSE}
+setwd("C:/Users/isabe/OneDrive/Escritorio/M/5 Machine Learning/Carlos Ortega/0 Concurso DrivenData")
+source("Funciones_R.R") #Funciones del profesor Guillermo Villarino
+paquetes(c('dplyr', 'data.table', 'caret', 'corrplot', 'lubridate', 'ranger', 'inspectdf', 'ClustImpute', 'MLmetrics', 'tidyverse', 'xgboost'))
+```
+
+## Cargar datos
+
+```{r carga datos, warning=FALSE}
+dt_train <- as.data.frame(fread("TrainSetValues.csv"))
+dt_test <- as.data.frame(fread("TestSetValues.csv"))
+
+```
+
+
+## Juntar train y test para limpieza y fe
+
+```{r unir train-test}
+dtTotal <- rbind(dt_train, dt_test)
+head(dtTotal)
+
+```
+
+# EDA
+
+```{r eda}
+# categorical plot
+x <- inspect_cat(dtTotal) 
+show_plot(x)
+
+# correlations in numeric columns
+x <- inspect_cor(dtTotal)
+show_plot(x)
+
+# feature imbalance bar plot
+x <- inspect_imb(dtTotal)
+show_plot(x)
+
+# memory usage barplot
+x <- inspect_mem(dtTotal)
+show_plot(x)
+
+# missingness barplot
+x <- inspect_na(dtTotal)
+show_plot(x)
+
+# histograms for numeric columns
+x <- inspect_num(dtTotal)
+show_plot(x)
+
+# barplot of column types
+x <- inspect_types(dtTotal)
+show_plot(x)
+
+```
+
+# Limpieza y Feature Engineering
+
+## Variables lógicas 
+
+Las variables lógicas las convierto a binarias (0-1)
+Antes quito los nas.
+
+```{r logicas a numericas}
+dtTotal[,as.vector(which(sapply(dtTotal, class)=="logical"))]<-sapply(Filter(is.logical, dtTotal),function(x) ImputacionCuali(x,"aleatorio"))
+
+#sum(is.na(dtTotal$fpublic_meeting))
+#sum(is.na(dtTotal$permit))
+
+dtTotal$fe_publicmeeting <- ifelse(dtTotal$public_meeting == TRUE, 1, 0)
+dtTotal$fe_permit        <- ifelse(dtTotal$permit == TRUE, 1, 0)
+
+# Elimino las originales
+dtTotal$public_meeting <- NULL
+dtTotal$permit         <- NULL
+
+#sum(is.na(dtTotal$fe_public_meeting))
+#sum(is.na(dtTotal$fe_permit))
+
+```
+
+## Variables numéricas
+
+### Variables geográficas
+
+Se observa que hay inconsistencias en las variables geográficas, haciendo un estudio en Google Maps veo que: 
+
+- Tanzania se encuentra entre el Ecuador y el paralelo 15º del hemisferio sur, por lo tanto, tendremos que encontrar latitudes concretamente entre -0.97 y -12º, el resto serán valores nulos.
+
+- También se encuentre a la derecha del meridiano de Greenwich, entre el meridiano 30 y 40 aprox., por lo que tendremos que encontrar longitudes concretamente entre 29º y como máximo 40.44º
+
+- Asimismo, Wikipedia informa que Tanzania no tiene puntos por debajo del nivel del mar, por lo que su *gps_height* no podrá ser menor que 0
+
+Comprobar inconsistencia de datos geográficos:
+
+```{r info geo}
+min(dtTotal$latitude)
+max(dtTotal$latitude) # existen valores mayores que -0.97 a tratar
+
+min(dtTotal$longitude) # existen valores menores de 29.00000º a tratar
+max(dtTotal$longitude)
+
+min(dtTotal$gps_height) # existen valores menores que 0 a tratar
+
+```
+
+Pasar a nulos (NAs) esos valores:
+
+```{r nas geo}
+dtTotal <- dtTotal %>% 
+  mutate(gps_height = ifelse(gps_height < 0, NA, gps_height)) %>% 
+  mutate(latitude = ifelse(latitude > -0.97, NA, latitude)) %>% 
+  mutate(longitude = ifelse(longitude <= 29.00000, NA, longitude)) 
+
+```
+
+Imputación:
+
+Los NAs generados en estas dos variables los voy a imputar con ClustImpute, de manera que imputará por sus vecinos próximos.
+Para poder utilizar esta función le tengo que pasar un dataframe con las 3 variables a imputar, generando un nuevo dataframe con esas variables imputadas que tengo que añadir a mi dt inicial.
+
+```{r imputar clustImpute}
+#names(dtTotal)
+var_a_imp <- dtTotal[ , c('gps_height', 'longitude', 'latitude')] 
+dtTotal_var_imp <- ClustImpute(var_a_imp, nr_cluster=3, nr_iter=10, c_steps=50, n_end=10) 
+
+dim(dtTotal_var_imp$complete_data)
+
+```
+
+```{r unir geo imputadas}
+var_imp <- dtTotal_var_imp$complete_data
+
+dtTotal <- cbind(dtTotal, var_imp) #unir las nuevas variables
+
+dtTotal$gps_height <- NULL
+dtTotal$longitude  <- NULL
+dtTotal$latitude   <- NULL
+
+```
+
+Compruebo que ya tengo los valores deseados en estas nuevas variables
+
+```{r comprobar geo}
+min(dtTotal$latitude)   
+max(dtTotal$latitude) # ya son todas menores a -0.97 
+
+min(dtTotal$longitude) 
+max(dtTotal$longitude) # ya son todas mayores a 29.00000º 
+
+min(dtTotal$gps_height) # ya no hay valores negativos
+
+```
+
+Habitualmente encontramos las coordenadas geograficas representadas por Latitud y Longitud separadas por una coma, por ejemplo: -2.14746569º, 34.6987661º. Creo una nueva variable que así lo represente.
+
+```{r fe coordenadas}
+dtTotal$fe_coordenadas <- paste(dtTotal$latitude, "º", ", ", dtTotal$longitude, "º", sep = "")
+head(dtTotal$fe_coordenadas)
+
+```
+
+Añado variable calculando la distancia (Nota: solo aparece en un modelo):
+
+```{r fe distancia}
+dtTotal$fe_distancia <- sqrt(dtTotal$longitude + dtTotal$latitude^2)
+
+```
+
+
+### Variables fecha
+
+Creo la variable *age* restando *construction_year* al año actual, voy a conservar esta variable pero antes todos los valores 0 de *construction_year* los paso a NAs y los imputo por aleatorio.
+
+```{r imputacion constru}
+dtTotal$construction_year <- replace(dtTotal$construction_year, which(dtTotal$construction_year==0), NA)
+dtTotal$construction_year <- round(ImputacionCuant(dtTotal$construction_year, "aleatorio"), 0)
+any(is.na(dtTotal$construction_year))
+
+# vuelvo a imputar para asegurme que no quedan nas
+dtTotal$construction_year <- round(ImputacionCuant(dtTotal$construction_year, "aleatorio"), 0)
+any(is.na(dtTotal$construction_year))
+
+```
+
+Nueva variable, edad de la bomba:
+
+```{r fe age}
+dtTotal$fe_age <- 2020 - dtTotal$construction_year
+any(is.na(dtTotal$fe_age))
+
+```
+
+Conviertiendo *date_recorded* a formato fecha creo nuevas variables:
+
+- Año de puesta en funcionamiento (por si alguna partida anual saliera defectuosa)
+- Mes de puesta en funcionamiento (por si tuviera incidencia debido a la estacionalidad)
+- Horas de funcionamiento: en maquinaria industrial habitualmente los mantenimientos se realizan por horas de funcionamiento (por ejemplo, a las 100, 250 o 500h, teniendo que cambiar ciertas piezas y realizando mantenimiento preventivo en cada ocasión), además, suelen estimarse en horas su vida útil. Con la diferencia entre la fecha actual y la de puesta en funcionamiento, y estimando que trabaja una media de 4h diarias, saco esta variable.
+- Para ver que vida estimada tienen las bombas en años, voy a sacar una variable que también sea edad pero desde la fecha de puesta en marcha y no de construcción, ya que podrían entrar en funcionamiento posteriormente
+
+```{r fecha}
+#class(dtTotal$date_recorded)
+# Convierto a fecha_hms
+dtTotal$fe_date_recorded <- ymd(dtTotal$date_recorded)
+class(dtTotal$fe_date_recorded)
+# Elimino original
+dtTotal$date_recorded <- NULL
+
+```
+
+```{r fe fecha}
+dtTotal$fe_year  <- year(dtTotal$fe_date_recorded)
+dtTotal$fe_month <- month(dtTotal$fe_date_recorded)
+
+today <- today()
+dtTotal$fe_horas<- as.numeric((today - dtTotal$fe_date_recorded)*4)
+
+dtTotal$fe_age_real <- 2020 - dtTotal$fe_year
+
+```
+
+### Otras
+
+- *amount_tsh* tiene muchos 0s, creo una nueva variable binaria que sea 0 si no tiene agua y 1 si sí tiene.
+
+```{r amount bin}
+dtTotal$fe_amount_tsh <- ifelse(dtTotal$amount_tsh == 0, 0, 1)
+# Elimino original
+dtTotal$amount_tsh <- NULL
+
+```
+
+- *num_private* es una variable constante, ya que no me da más información y tampoco conozco su explicación, la elimino.
+
+```{r num_pri delete}
+dtTotal$num_private <- NULL
+
+```
+
+- *id* que como no tiene valores repetidos ni nulos lo trato como un identificador.
+
+- *region_code* y *district_code* que tampoco tienen valores nulos así que las dejo igual.
+
+- *population* tiene algún valor muy alto que podría referirse a la capital y muchos valores 0 pero como en África hay poblaciones que se transladan varios km para recoger agua no voy a considerar ningun valor como erroneo y dejo la variable igual.
+
+## Variables categóricas
+
+### Variables con info duplicada
+
+Dentro de las variables categóricas encontramos varias que tienen la misma descripción. Aprovecho lo que realizamos con mi grupo de tirar un modelo Random Forest y quedarme con solo una de ellas, la que más imporantancia tiene para el modelo.
+
+El modelo sería el siguiente, no lo corro (tendría que separ train y test y unir la target)
+
+```{r rf cat}
+#my_mod_cat <- ranger( 
+#  as.factor(status_group) ~ scheme_management + scheme_name
+#  + extraction_type  + extraction_type_group + extraction_type_class 
+#  + management + management_group 
+#  + payment + payment_type 
+#  + water_quality + quality_group 
+#  + quantity + quantity_group 
+#  + source + source_type + source_class 
+#  + waterpoint_type + waterpoint_type_group,
+#  data = dtEnd, importance = 'impurity',
+#  verbose = TRUE)
+
+```
+
+Me quedo con: *scheme_name, extraction_type_class, management, payment, water_quality, quantity, source* y *waterpoint_type*, el resto las elimino:
+
+```{r eliminar cat dup}
+dtTotal$scheme_management     <- NULL
+dtTotal$extraction_type       <- NULL
+dtTotal$extraction_type_group <- NULL
+dtTotal$management_group      <- NULL
+dtTotal$payment_type          <- NULL
+dtTotal$quality_group         <- NULL
+dtTotal$quantity_group        <- NULL
+dtTotal$source_type           <- NULL
+dtTotal$source_class          <- NULL
+dtTotal$waterpoint_type_group <- NULL
+
+```
+
+Variables categóricas (con sus frecuencias)
+
+```{r cat freq}
+for (i in 1:ncol(dtTotal)) {
+  
+  tmp_clas <- class(dtTotal[,i])
+  tmp_lg <- length(unique(dtTotal[,i]))               
+  
+  if (tmp_clas == 'character') {        
+    print( c(names(dtTotal)[i], tmp_lg))  
+  } 
+}
+
+```
+
+*recorded_by* elimino ya que es constante:
+
+```{r recorded_by delete}
+dtTotal$recorded_by <- NULL
+
+```
+
+El resto las cambio por su frecuencia: 
+
+```{r change freq cat}
+class(dtTotal)
+dtTotal <- as.data.table(dtTotal) #me aseguro que mi dtTotal es un data.table para que funcione de esta manera
+class(dtTotal)
+
+dtTotal[ , fe_funder := .N , by = .(funder)]      
+dtTotal[ , fe_installer := .N , by = .(installer)]                                                     
+dtTotal[ , fe_wpt_name := .N , by = .(wpt_name)]
+dtTotal[ , fe_basin := .N , by = .(basin)]
+dtTotal[ , fe_subvillage := .N , by = .(subvillage)]
+dtTotal[ , fe_region := .N , by = .(region)]
+dtTotal[ , fe_lga := .N , by = .(lga)] 
+dtTotal[ , fe_ward := .N , by = .(ward)] 
+dtTotal[ , fe_scheme_name := .N , by = .(scheme_name)]
+dtTotal[ , fe_extraction_type_class := .N , by = .(extraction_type_class)]
+dtTotal[ , fe_management := .N , by = .(management)]
+dtTotal[ , fe_payment := .N , by = .(payment)]
+dtTotal[ , fe_water_quality := .N , by = .(water_quality)]
+dtTotal[ , fe_quantity := .N , by = .(quantity)]
+dtTotal[ , fe_source := .N , by = .(source)]
+dtTotal[ , fe_waterpoint_type := .N , by = .(waterpoint_type)]
+dtTotal[ , fe_fe_coordenadas := .N , by = .(fe_coordenadas)]
+
+delete <- c('funder', 'installer', 'wpt_name', 'basin', 'subvillage', 'region', 'lga',  'ward', 'scheme_name', "extraction_type_class", 'management', "payment", "water_quality", "quantity",'source', "waterpoint_type", 'fe_coordenadas')   
+dtTotal[ , (delete) := NULL]
+
+```
+
+# Dataframe final
+
+## Separar train y test para el modelado
+
+Ahora que ya está hecha la limpieza y el fe vuelvo a separar train y test
+
+```{r train-test}
+mi_train <- as.data.frame(dtTotal[1:59400, ])
+mi_test  <- as.data.frame(dtTotal[59401:74250, ]) 
+
+```
+
+## Juntar target
+
+Creo dtEnd que serán mis datos finales para poder modelar, para ello le añado la target
+
+```{r target, warning=FALSE}
+dt_label <- as.data.frame(fread("TrainSetLabels.csv"))
+
+all.equal(dt_label[,1],mi_train[,1]) 
+dtEnd <- merge(mi_train, dt_label, by.x = "id", by.y = "id", all = TRUE)
+
+```
+
+# Modelos
+
+He realizado varios modelos con esta limpieza y fe, logrando los siguientes resultados en la plataforma Drivendata.
+Mi usuario es **isabelartero**
+
+Nota: *fe_distancia* sola la incluye el primer modelo ya que era el que mejor me habia salido de todos y lo repetí para ver si de verdad era tan decisiva la variable para lograr un mejor score como comentaban mis compañeros en el foro y en clase.
+
+## Modelo ranger sin muchos parámetros
+  
+Mismo modelo que hice con mis compañeros de grupo 
+
+    - Resultado sin *fe_distancia*: 0.8190 
+    - Resultado con *fe_distancia*: 0.8194 (mejor resultado obtenido)
+  
+```{r ranger1}
+modelo_ranger1 <- ranger( 
+                     as.factor(status_group) ~., 
+                     data            = dtEnd,
+                     importance      = 'impurity',          
+                     verbose         = TRUE)
+modelo_ranger1
+
+```
+
+Importancia de las variables:
+
+```{r imp var ranger1}
+rang_ranger1 <- as.data.frame(importance(modelo_ranger1))
+rang_ranger1$vars <- rownames(rang_ranger1)
+names(rang_ranger1)[1]<- c('Importance')
+rang_ranger1 %>%
+  arrange(desc(Importance))
+
+```
+
+Subida:
+
+```{r submission ranger1}
+pred_ranger1 <- predict(modelo_ranger1, mi_test)
+ia_sub_ranger1 <- data.frame(
+                     id = mi_test$id,
+                     status_group = pred_ranger1$prediction
+                     )
+fwrite(ia_sub_ranger1, file= "ia_sub_ranger1BIS.csv", sep=",")
+
+```
+
+Estos modelos ya no incluyen *fe_distancia* ya que esta variable la incluí a posteriori (la elimino para que coincida la subida con el resultado obtenido)
+
+```{r delete distancia}
+dtEnd$fe_distancia <- NULL
+mi_test$fe_distancia <- NULL
+```
+
+## Modelo ranger con GridSearch 
+
+Gridsearch en el número de árboles, resultando el ganador el de 250
+
+    - Resultado sin *fe_distancia*:*: 0.8182
+  
+```{r ranger gs}
+val_trees <- c(100, 150, 200, 250)  
+
+for (i in val_trees) {
+  print(i)  
+  set.seed(7)
+  fit <- ranger( 
+             as.factor(status_group) ~., 
+             data            = dtEnd, 
+             num.trees       = i,
+             importance      = 'impurity',          
+             write.forest    = TRUE,
+             min.node.size   = 1,
+             splitrule       = "gini",              
+             verbose         = TRUE,
+             classification  = TRUE)
+    
+  valor_pred <- predict(fit, data = dtEnd)
+  fit_acc <- Accuracy(y_pred = valor_pred$predictions, y_true = dtEnd$status_group)
+  print(fit_acc)}
+
+```
+
+```{r ranger gs250}
+modelo_ranger250 <- ranger( 
+                             as.factor(status_group) ~., 
+                             data            = dtEnd, 
+                             num.trees       = 250,
+                             importance      = 'impurity',          
+                             write.forest    = TRUE,
+                             min.node.size   = 1,
+                             splitrule       = "gini",              
+                             verbose         = TRUE,
+                             classification  = TRUE)
+
+modelo_ranger250
+
+```
+
+Importancia de las variables:
+
+```{r imp var ranger gs}
+rang_ranger250 <- as.data.frame(importance(modelo_ranger250))
+rang_ranger250$vars <- rownames(rang_ranger250)
+names(rang_ranger250)[1]<- c('Importance')
+rang_ranger250 %>%
+  arrange(desc(Importance))
+
+```
+
+Subida:
+
+```{r submission ranger gs}
+pred_ranger250 <- predict(modelo_ranger250, mi_test)
+ia_sub_ranger250 <- data.frame(
+                     id = mi_test$id,
+                     status_group = pred_ranger250$prediction
+                     )
+fwrite(ia_sub_ranger250, file= "ia_sub_ranger250.csv", sep=",")
+
+```
+
+## Modelo XGBoost
+
+Mismos parámetros que mis compañeros que ganaron el concurso, excepto el numero de rondas que lo cambio a 10
+
+    - Resultado sin *fe_distancia*: 0.8150
+
+Nota: Este modelo también se subió con un error en la selección de la targe que me dio un resultado de 0.8028 
+  
+```{r xgb1}
+#Paso target a factor y numérica para que funcione
+target <- as.factor(dtEnd$status_group)
+target <- as.integer(target)-1
+
+library(xgboost)
+
+#convertir a DMatrix
+dtEnd_mat <- xgb.DMatrix(data.matrix(dtEnd[,-35]), label=target)
+
+#modelo
+modelo_xgb <- xgboost(data = dtEnd_mat, 
+                      max_depth = 17, 
+                      eta = 0.02,
+                      nthread = 8,
+                      subsample = 0.8, 
+                      colsample_bytree = 0.5,
+                      min_child_weight = 1, 
+                      nrounds = 10, 
+                      num_class = 3,
+                      objective = "multi:softprob", 
+                      maximize = FALSE)
+
+modelo_xgb
+
+```
+
+Importancia de variables: 
+
+```{r imp var xgb1}
+importance <- xgb.importance(feature_names = names(dtEnd[,-35]), model = modelo_xgb)
+xgb.plot.importance(importance)
+
+```
+
+Subida:
+
+```{r prediction xgb1}
+test_max <- xgb.DMatrix(data.matrix(mi_test))
+
+prediccion_xgb <- predict(modelo_xgb, test_max, reshape = T)
+colnames(prediccion_xgb) <- c("functional", "functional needs repair", "non functional")
+  
+prediccion_xgb$prediction = apply(prediccion_xgb, 1 , function(x) colnames(prediccion_xgb)[which.max(x)])
+
+```
+
+```{r submission xgb1}
+# Submission 
+ia_sub_xgb <- data.frame(
+                     id = mi_test$id,
+                     status_group = prediccion_xgb$prediction
+                     )
+fwrite(ia_sub_xgb, file= "ia_sub_xgb.csv", sep=",")
+
+```
+
+## Modelo XGBboost con parámetros por defecto
+
+Dado que el resultado ha sido tan malo con los mismos parámetros que usaron mis compañeros de concurso, los cambio por los dados por defecto en el algoritmo, dando un resultado todavía peor.
+
+    - Resultado sin *fe_distancia*: 0.7336
+
+Nota: Este modelo también se subió con un error en la selección de la targe que me dio un resultado de 0.7345 
+  
+```{r xgb2}
+#Paso target a factor y numérica para que funcione
+target <- as.factor(dtEnd$status_group)
+target <- as.integer(target)-1
+
+#convertir a DMatrix
+dtEnd_mat <- xgb.DMatrix(data.matrix(dtEnd[,-35]), label=target)
+
+#modelo
+modelo_xgb_2 <- xgboost(data = dtEnd_mat, 
+                      max_depth = 6,             
+                      eta = 0.03,                 
+                      nthread = 8,
+                      subsample = 0.5,            
+                      colsample_bytree = 1,
+                      min_child_weight = 1, 
+                      nrounds = 10, 
+                      num_class = 3,
+                      objective = "multi:softprob", 
+                      maximize = FALSE)
+
+modelo_xgb_2
+
+```
+
+Importancia de variables:
+
+```{r imp var xgb2}
+importance <- xgb.importance(feature_names = names(dtEnd[,-35]), model = modelo_xgb_2)
+xgb.plot.importance(importance)
+
+```
+
+Subida:
+
+```{r prediction xgb2}
+test_max <- xgb.DMatrix(data.matrix(mi_test))
+
+prediccion_xgb_2 <- predict(modelo_xgb_2, test_max, reshape = T)
+colnames(prediccion_xgb_2) <- c("functional", "functional needs repair", "non functional")
+  
+prediccion_xgb_2$prediction = apply(prediccion_xgb_2, 1 , function(x) colnames(prediccion_xgb_2)[which.max(x)])
+
+```
+
+```{r submission xgb2}
+# Submission 
+ia_sub_xgb_2 <- data.frame(
+                     id = mi_test$id,
+                     status_group = prediccion_xgb_2$prediction
+                     )
+fwrite(ia_sub_xgb_2, file= "ia_sub_xgb2.csv", sep=",")
+
+```
+
+# Conclusiones
+
+Puesto que el modelo con mayor resultado ha sido con el primer modelo ranger vemos que las más importantes a la hora de que una bomba funcione o no, o necesite repararse son las siguientes:
+
+    - La cantidad de agua que contiene el pozo es la variable más importante a la hora de que este se estrope, necesito reparación o funcione
+    - La situación en la que se encuentra el pozo también es importante, dada por este orden en: longitud, latitud y la nueva variable distancia
+    - El tipo de agua del pozo y el tipo de extración 
+    - La edad de la bomba
+    - También es imporantante el id, el identificativo de la bomba, pero esto sería dificil de trazar ya que es un valor único y con las nuevas bombas que añadieramos sería diferente
+
+
+
